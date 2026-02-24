@@ -91,7 +91,25 @@ The controller can be configured via environment variables:
 | `REDIS_HOST` | `localhost` | Redis hostname |
 | `REDIS_PORT` | `6379` | Redis port |
 | `REDIS_PASSWORD` | `` | Redis password (optional) |
+| `AWS_ACCESS_KEY_ID` | — | AWS access key (for EKS get-token / AWS API calls) |
+| `AWS_SECRET_ACCESS_KEY` | — | AWS secret key |
+| `AWS_REGION` | `us-east-1` | AWS region |
+| `API_KEY` | — | Optional: when set with `API_SECRET`, proxy requests require this key |
+| `API_SECRET` | — | Optional: when set with `API_KEY`, proxy requests require this secret |
 | `LOG_LEVEL` | `info` | Logging level (debug, info, warn, error) |
+
+### AWS credentials
+
+Set `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (and optionally `AWS_REGION`) when the controller runs against an EKS cluster or needs to call AWS APIs. The Kubernetes client uses these for `aws eks get-token` when your kubeconfig uses AWS auth.
+
+### API key/secret auth
+
+If both `API_KEY` and `API_SECRET` are set, all proxy requests (except `/health` and `/metrics`) must authenticate using either:
+
+- **Headers:** `X-API-Key` and `X-API-Secret`
+- **Basic auth:** `Authorization: Basic base64(API_KEY:API_SECRET)`
+
+Leave either unset to disable request authentication.
 
 ## Usage
 

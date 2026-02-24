@@ -4,7 +4,13 @@ import K8sDiscovery from './lib/k8s-discovery';
 import DocumentAffinity from './lib/document-affinity';
 import LoadBalancer from './lib/load-balancer';
 import logger from './lib/logger';
+import { optionalApiKeyAuth } from './lib/auth';
 import type { Backend } from './lib/types';
+
+// Ensure AWS_REGION is set when using AWS credentials (e.g. for EKS get-token)
+if (process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_REGION) {
+  process.env.AWS_REGION = process.env.AWS_REGION || 'us-east-1';
+}
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -37,6 +43,16 @@ const loadBalancer = new LoadBalancer({
 
 // Middleware to parse JSON
 app.use(express.json());
+
+// Optional API key/secret auth for proxy (skip for health and metrics)
+const requireAuth = optionalApiKeyAuth();
+if (requireAuth) {
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path === '/health' || req.path === '/metrics') return next();
+    requireAuth(req, res, next);
+  });
+  logger.info('API key/secret authentication enabled');
+}
 
 // Health check endpoint
 app.get('/health', (req: Request, res: Response) => {
