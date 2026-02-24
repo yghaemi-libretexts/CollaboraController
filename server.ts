@@ -15,7 +15,7 @@ if (process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_REGION) {
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 const COLLABORA_SERVICE = process.env.COLLABORA_SERVICE || 'collabora';
-const COLLABORA_NAMESPACE = process.env.COLLABORA_NAMESPACE || 'awadep';
+const COLLABORA_NAMESPACE = process.env.COLLABORA_NAMESPACE || 'default';
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 const REDIS_PASSWORD = process.env.REDIS_PASSWORD || '';
