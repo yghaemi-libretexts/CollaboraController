@@ -49,6 +49,18 @@ const loadBalancer = new LoadBalancer({
 // Middleware to parse JSON
 app.use(express.json());
 
+// Require a Bearer token on every request (except health/metrics)
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (req.path === '/health' || req.path === '/metrics') return next();
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing Bearer token' });
+  }
+
+  next();
+});
+
 // Optional API key/secret auth for proxy (skip for health and metrics)
 const requireAuth = optionalApiKeyAuth();
 if (requireAuth) {
