@@ -3,8 +3,8 @@ import { Request, Response } from 'express';
 
 export interface Backend {
   url: string;
-  podName: string;
-  podIP: string;
+  serviceName: string;
+  serviceIP: string;
   weight: number;
   draining: boolean;
   status: 'healthy' | 'unhealthy' | 'draining';

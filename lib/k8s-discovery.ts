@@ -102,115 +102,65 @@ export default class K8sDiscovery {
     });
   }
 
-  async discoverPods(): Promise<Backend[]> {
-    const serviceBackends = new Map<string, Backend>();
-
+  async discoverServices(): Promise<Backend[]> {
     if (!this.k8sApi) {
       await this.initialize();
     }
 
     try {
-      this.logger.info('Listing pods', {
+      this.logger.info('Listing services', {
         namespace: this.namespace,
-        labelSelector: `app=${this.serviceName}`,
+        selectorApp: this.serviceName,
       });
 
-      const response = await this.k8sApi!.listNamespacedPod({
+      const response = await this.k8sApi!.listNamespacedService({
         namespace: this.namespace,
-        labelSelector: `app=${this.serviceName}`,
       });
-      try{
 
-         const serviceResponse = await this.k8sApi!.listNamespacedService({
-          namespace: this.namespace,
-          // labelSelector: `app=${this.serviceName}`,
-        });
-        const services = serviceResponse.items || [];
-        services.filter(service => service.spec?.selector?.app === this.serviceName).forEach(service => {
-          const serviceName = service.metadata?.name || '';
-          const serviceIP = service.spec?.clusterIP || '';
-          const servicePort = service.spec?.ports?.[0]?.port || 0;
-          const serviceProtocol = service.spec?.ports?.[0]?.protocol || 'TCP';
-          const serviceType = service.spec?.type || 'ClusterIP';
-          const serviceSelector = service.spec?.selector || {};
-          const serviceAnnotations = service.metadata?.annotations || {};
-          const serviceLabels = service.metadata?.labels || {};
-          console.log('Service:', {
-            
-            name: serviceName,
-            ip: serviceIP,
-            port: servicePort,
-            protocol: serviceProtocol,
-            type: serviceType,
-            selector: serviceSelector,
-            annotations: serviceAnnotations,
-            labels: serviceLabels,
-          });
-          serviceBackends.set(serviceName, {
-            url: `http://${serviceIP}:${servicePort}`,
-            podName: serviceName,
-            podIP: serviceIP,
-            weight: 100,
-            draining: false,
-            status: 'healthy',
-            connections: 0,
-            lastSeen: new Date(),
-          });
-        });
-      
-     
+      const services = (response.items || []).filter(
+        (svc) => svc.spec?.selector?.app === this.serviceName
+      );
 
-      } catch (error) {
-        this.logger.error('Error reading service:', error);
-      }
-     
-
-      const pods = response.items || [];
-      this.logger.info(`K8s API returned ${pods.length} pod(s) matching selector`);
+      this.logger.info(`K8s API returned ${services.length} service(s) matching selector`);
 
       const newBackends = new Map<string, Backend>();
-      
 
-      for (const pod of pods) {
-        const podName = pod.metadata?.name || '';
-        const podIP = pod.status?.podIP;
-        const phase = pod.status?.phase;
-        const ready =
-          pod.status?.conditions?.find(
-            (c: k8s.V1PodCondition) => c.type === 'Ready'
-          )?.status === 'True';
+      for (const svc of services) {
+        const name = svc.metadata?.name || '';
+        const clusterIP = svc.spec?.clusterIP || '';
+        const port = svc.spec?.ports?.[0]?.port || 9980;
 
-        this.logger.info(`  pod ${podName}: phase=${phase} ready=${ready} ip=${podIP || 'none'}`);
-
-        if (phase === 'Running' && ready && podIP) {
-          const port = this.getPodPort(pod) || 9980;
-          const url = `http://${podIP}:${port}`;
-          const weight = parseInt(
-            pod.metadata?.annotations?.['collabora-controller/weight'] || '100',
-            10
-          );
-          const draining =
-            pod.metadata?.annotations?.['collabora-controller/draining'] === 'true';
-
-          const backend: Backend = {
-            url,
-            podName,
-            podIP,
-            weight,
-            draining,
-            status: draining ? 'draining' : 'healthy',
-            connections: this.backends.get(url)?.connections || 0,
-            lastSeen: new Date(),
-          };
-
-          newBackends.set(url, backend);
-          this.logger.info(`  -> registered backend ${podName} at ${url}`);
+        if (!clusterIP || clusterIP === 'None') {
+          this.logger.info(`  service ${name}: skipping (no ClusterIP)`);
+          continue;
         }
+
+        const url = `http://${clusterIP}:${port}`;
+        const weight = parseInt(
+          svc.metadata?.annotations?.['collabora-controller/weight'] || '100',
+          10
+        );
+        const draining =
+          svc.metadata?.annotations?.['collabora-controller/draining'] === 'true';
+
+        const backend: Backend = {
+          url,
+          serviceName: name,
+          serviceIP: clusterIP,
+          weight,
+          draining,
+          status: draining ? 'draining' : 'healthy',
+          connections: this.backends.get(url)?.connections || 0,
+          lastSeen: new Date(),
+        };
+
+        newBackends.set(url, backend);
+        this.logger.info(`  -> registered backend ${name} at ${url}`);
       }
 
       for (const url of this.backends.keys()) {
         if (!newBackends.has(url)) {
-          this.logger.info(`Pod removed: ${url}`);
+          this.logger.info(`Service removed: ${url}`);
           this.backends.delete(url);
         }
       }
@@ -225,29 +175,23 @@ export default class K8sDiscovery {
       this.updateCallback?.(Array.from(this.backends.values()));
       return Array.from(this.backends.values());
     } catch (error) {
-      this.logger.error('Error discovering pods:', error);
+      this.logger.error('Error discovering services:', error);
       throw error;
     }
   }
 
-  private getPodPort(pod: k8s.V1Pod): number | undefined {
-    return pod.spec?.containers?.[0]?.ports?.[0]?.containerPort ?? 9980;
-  }
-
   async start(): Promise<void> {
     await this.initialize();
-    await this.discoverPods();
+    await this.discoverServices();
 
-    // Periodic pod refresh
     this.discoveryInterval = setInterval(async () => {
       try {
-        await this.discoverPods();
+        await this.discoverServices();
       } catch (error) {
         this.logger.error('Error in periodic discovery:', error);
       }
     }, 500000);
 
-    // Refresh EKS token before it expires (every 14 min)
     if (this.useEKS) {
       this.tokenRefreshInterval = setInterval(async () => {
         try {
@@ -259,30 +203,31 @@ export default class K8sDiscovery {
     }
 
     try {
-      await this.watchPods();
+      await this.watchServices();
     } catch (error) {
-      this.logger.warn('Failed to set up pod watch, using polling only:', error);
+      this.logger.warn('Failed to set up service watch, using polling only:', error);
     }
   }
 
-  private async watchPods(): Promise<void> {
+  private async watchServices(): Promise<void> {
     if (!this.kc) throw new Error('KubeConfig not initialized');
 
-    // Reuse the same authenticated KubeConfig — not a second loadFromDefault()
     const watch = new k8s.Watch(this.kc);
     this.watch = watch;
 
     watch.watch(
-      `/api/v1/namespaces/${this.namespace}/pods`,
-      { labelSelector: `app=${this.serviceName}` },
-      async (type: string, obj: k8s.V1Pod) => {
-        this.logger.debug(`Pod event: ${type} - ${obj.metadata?.name}`);
-        await this.discoverPods();
+      `/api/v1/namespaces/${this.namespace}/services`,
+      {},
+      async (type: string, obj: k8s.V1Service) => {
+        if (obj.spec?.selector?.app === this.serviceName) {
+          this.logger.debug(`Service event: ${type} - ${obj.metadata?.name}`);
+          await this.discoverServices();
+        }
       },
       (err: any) => {
         if (err) {
           this.logger.error('Watch error:', err);
-          setTimeout(() => this.watchPods(), 5000);
+          setTimeout(() => this.watchServices(), 5000);
         }
       }
     );

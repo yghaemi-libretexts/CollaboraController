@@ -15,8 +15,8 @@ describe('LoadBalancer', () => {
 
   const createMockBackend = (overrides?: Partial<Backend>): Backend => ({
     url: 'http://backend1:9980',
-    podName: 'pod1',
-    podIP: '10.0.0.1',
+    serviceName: 'svc1',
+    serviceIP: '10.96.0.10',
     weight: 100,
     draining: false,
     status: 'healthy',

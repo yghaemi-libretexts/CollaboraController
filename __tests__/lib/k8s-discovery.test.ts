@@ -11,23 +11,19 @@ describe('K8sDiscovery', () => {
   let mockKubeConfig: jest.Mocked<k8s.KubeConfig>;
   let mockWatch: jest.Mocked<k8s.Watch>;
 
-  const createMockPod = (overrides: any = {}) => ({
+  const createMockService = (overrides: any = {}) => ({
     metadata: {
-      name: 'pod1',
+      name: 'collabora-svc',
       annotations: {},
+      labels: {},
       ...overrides.metadata
     },
     spec: {
-      containers: [{
-        ports: [{ containerPort: 9980 }]
-      }],
+      clusterIP: '10.96.0.10',
+      ports: [{ port: 9980, protocol: 'TCP' }],
+      selector: { app: 'collabora' },
+      type: 'ClusterIP',
       ...overrides.spec
-    },
-    status: {
-      podIP: '10.0.0.1',
-      phase: 'Running',
-      conditions: [{ type: 'Ready', status: 'True' }],
-      ...overrides.status
     },
     ...overrides
   });
@@ -36,12 +32,14 @@ describe('K8sDiscovery', () => {
     jest.clearAllMocks();
 
     mockK8sApi = {
-      listNamespacedPod: jest.fn()
+      listNamespacedService: jest.fn()
     } as any;
 
     mockKubeConfig = {
       loadFromDefault: jest.fn(),
-      makeApiClient: jest.fn(() => mockK8sApi)
+      makeApiClient: jest.fn(() => mockK8sApi),
+      getCurrentContext: jest.fn(() => 'test-ctx'),
+      getCurrentCluster: jest.fn(() => ({ server: 'https://localhost:6443' }))
     } as any;
 
     mockWatch = {
@@ -75,157 +73,152 @@ describe('K8sDiscovery', () => {
     });
   });
 
-  describe('discoverPods', () => {
+  describe('discoverServices', () => {
     beforeEach(async () => {
       await k8sDiscovery.initialize();
     });
 
-    it('should discover running and ready pods', async () => {
-      const mockPods = [
-        createMockPod({ metadata: { name: 'pod1' } }),
-        createMockPod({ 
-          metadata: { name: 'pod2' },
-          status: { podIP: '10.0.0.2' }
+    it('should discover matching services', async () => {
+      const mockServices = [
+        createMockService({ metadata: { name: 'svc1' } }),
+        createMockService({
+          metadata: { name: 'svc2' },
+          spec: { clusterIP: '10.96.0.20', ports: [{ port: 9980 }], selector: { app: 'collabora' } }
         })
       ];
 
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      const backends = await k8sDiscovery.discoverPods();
+      const backends = await k8sDiscovery.discoverServices();
 
       expect(backends).toHaveLength(2);
-      expect(backends[0].podName).toBe('pod1');
-      expect(backends[0].url).toBe('http://10.0.0.1:9980');
-      expect(backends[1].podName).toBe('pod2');
+      expect(backends[0].serviceName).toBe('svc1');
+      expect(backends[0].url).toBe('http://10.96.0.10:9980');
+      expect(backends[1].serviceName).toBe('svc2');
     });
 
-    it('should filter out non-running pods', async () => {
-      const mockPods = [
-        createMockPod({ status: { phase: 'Pending' } }),
-        createMockPod({ status: { phase: 'Running' } })
+    it('should filter out services with non-matching selector', async () => {
+      const mockServices = [
+        createMockService({ spec: { selector: { app: 'other' }, clusterIP: '10.96.0.10', ports: [{ port: 80 }] } }),
+        createMockService()
       ];
 
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      const backends = await k8sDiscovery.discoverPods();
+      const backends = await k8sDiscovery.discoverServices();
 
       expect(backends).toHaveLength(1);
       expect(backends[0].status).toBe('healthy');
     });
 
-    it('should filter out not-ready pods', async () => {
-      const mockPods = [
-        createMockPod({ 
-          status: { 
-            conditions: [{ type: 'Ready', status: 'False' }] 
-          } 
-        }),
-        createMockPod()
+    it('should skip headless services (clusterIP=None)', async () => {
+      const mockServices = [
+        createMockService({ spec: { clusterIP: 'None', ports: [{ port: 9980 }], selector: { app: 'collabora' } } }),
+        createMockService()
       ];
 
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      const backends = await k8sDiscovery.discoverPods();
+      const backends = await k8sDiscovery.discoverServices();
 
       expect(backends).toHaveLength(1);
     });
 
     it('should extract weight from annotations', async () => {
-      const mockPods = [
-        createMockPod({
+      const mockServices = [
+        createMockService({
           metadata: {
+            name: 'svc1',
             annotations: { 'collabora-controller/weight': '150' }
           }
         })
       ];
 
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      const backends = await k8sDiscovery.discoverPods();
+      const backends = await k8sDiscovery.discoverServices();
 
       expect(backends[0].weight).toBe(150);
     });
 
-    it('should detect draining pods', async () => {
-      const mockPods = [
-        createMockPod({
+    it('should detect draining services', async () => {
+      const mockServices = [
+        createMockService({
           metadata: {
+            name: 'svc1',
             annotations: { 'collabora-controller/draining': 'true' }
           }
         })
       ];
 
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      const backends = await k8sDiscovery.discoverPods();
+      const backends = await k8sDiscovery.discoverServices();
 
       expect(backends[0].draining).toBe(true);
       expect(backends[0].status).toBe('draining');
     });
 
     it('should preserve connection counts when updating', async () => {
-      const mockPods = [createMockPod()];
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      const mockServices = [createMockService()];
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      await k8sDiscovery.discoverPods();
+      await k8sDiscovery.discoverServices();
       const backends1 = k8sDiscovery.getBackends();
-      
-      // Simulate connection increment
       backends1[0].connections = 5;
 
-      // Rediscover
-      await k8sDiscovery.discoverPods();
+      await k8sDiscovery.discoverServices();
       const backends2 = k8sDiscovery.getBackends();
 
       expect(backends2[0].connections).toBe(5);
     });
 
     it('should remove backends that no longer exist', async () => {
-      const mockPods1 = [
-        createMockPod({ metadata: { name: 'pod1' }, status: { podIP: '10.0.0.1' } }),
-        createMockPod({ metadata: { name: 'pod2' }, status: { podIP: '10.0.0.2' } })
+      const mockServices1 = [
+        createMockService({ metadata: { name: 'svc1' }, spec: { clusterIP: '10.96.0.10', ports: [{ port: 9980 }], selector: { app: 'collabora' } } }),
+        createMockService({ metadata: { name: 'svc2' }, spec: { clusterIP: '10.96.0.20', ports: [{ port: 9980 }], selector: { app: 'collabora' } } })
       ];
-      mockK8sApi.listNamespacedPod.mockResolvedValueOnce({
-        items: mockPods1
+      mockK8sApi.listNamespacedService.mockResolvedValueOnce({
+        items: mockServices1
       } as any);
 
-      await k8sDiscovery.discoverPods();
+      await k8sDiscovery.discoverServices();
       expect(k8sDiscovery.getBackends()).toHaveLength(2);
 
-      const mockPods2 = [
-        createMockPod({ metadata: { name: 'pod1' }, status: { podIP: '10.0.0.1' } })
+      const mockServices2 = [
+        createMockService({ metadata: { name: 'svc1' }, spec: { clusterIP: '10.96.0.10', ports: [{ port: 9980 }], selector: { app: 'collabora' } } })
       ];
-      mockK8sApi.listNamespacedPod.mockResolvedValueOnce({
-        items: mockPods2
+      mockK8sApi.listNamespacedService.mockResolvedValueOnce({
+        items: mockServices2
       } as any);
 
-      await k8sDiscovery.discoverPods();
+      await k8sDiscovery.discoverServices();
       expect(k8sDiscovery.getBackends()).toHaveLength(1);
     });
 
     it('should handle discovery errors', async () => {
-      mockK8sApi.listNamespacedPod.mockRejectedValueOnce(new Error('API error'));
+      mockK8sApi.listNamespacedService.mockRejectedValueOnce(new Error('API error'));
 
-      await expect(k8sDiscovery.discoverPods()).rejects.toThrow();
+      await expect(k8sDiscovery.discoverServices()).rejects.toThrow();
     });
   });
 
   describe('start', () => {
     beforeEach(async () => {
       await k8sDiscovery.initialize();
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
+      mockK8sApi.listNamespacedService.mockResolvedValue({
         items: []
       } as any);
     });
@@ -235,18 +228,16 @@ describe('K8sDiscovery', () => {
       
       await k8sDiscovery.start();
       
-      expect(mockK8sApi.listNamespacedPod).toHaveBeenCalled();
+      expect(mockK8sApi.listNamespacedService).toHaveBeenCalled();
       
-      // Fast-forward time
-      jest.advanceTimersByTime(5000);
+      jest.advanceTimersByTime(500000);
       
-      // Should have been called again
-      expect(mockK8sApi.listNamespacedPod).toHaveBeenCalledTimes(2);
+      expect(mockK8sApi.listNamespacedService).toHaveBeenCalledTimes(3);
       
       jest.useRealTimers();
     });
 
-    it('should set up pod watch', async () => {
+    it('should set up service watch', async () => {
       await k8sDiscovery.start();
       
       expect(mockWatch.watch).toHaveBeenCalled();
@@ -260,7 +251,6 @@ describe('K8sDiscovery', () => {
       
       await k8sDiscovery.stop();
       
-      // Watch doesn't have abort method, but stop() clears the reference
       expect(k8sDiscovery).toBeDefined();
       
       jest.useRealTimers();
@@ -272,22 +262,6 @@ describe('K8sDiscovery', () => {
       const callback = jest.fn();
       k8sDiscovery.onUpdate(callback);
       
-      // Simulate update
-      const backends = [
-        {
-          url: 'http://backend1:9980',
-          podName: 'pod1',
-          podIP: '10.0.0.1',
-          weight: 100,
-          draining: false,
-          status: 'healthy' as const,
-          connections: 0,
-          lastSeen: new Date()
-        }
-      ];
-      
-      // Manually trigger callback (in real implementation, this is called from discoverPods)
-      // We can't easily test this without refactoring, but the method exists
       expect(typeof k8sDiscovery.onUpdate).toBe('function');
     });
   });
@@ -299,12 +273,12 @@ describe('K8sDiscovery', () => {
 
     it('should return discovered backends', async () => {
       await k8sDiscovery.initialize();
-      const mockPods = [createMockPod()];
-      mockK8sApi.listNamespacedPod.mockResolvedValue({
-        items: mockPods
+      const mockServices = [createMockService()];
+      mockK8sApi.listNamespacedService.mockResolvedValue({
+        items: mockServices
       } as any);
 
-      await k8sDiscovery.discoverPods();
+      await k8sDiscovery.discoverServices();
       const backends = k8sDiscovery.getBackends();
 
       expect(backends).toHaveLength(1);
