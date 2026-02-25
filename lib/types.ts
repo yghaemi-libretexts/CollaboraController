@@ -15,6 +15,7 @@ export interface Backend {
 export interface K8sDiscoveryOptions {
   namespace?: string;
   serviceName?: string;
+  clusterName?: string;
   logger?: Logger;
 }
 

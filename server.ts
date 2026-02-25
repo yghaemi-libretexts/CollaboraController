@@ -1,3 +1,8 @@
+import path from 'path';
+import dotenv from 'dotenv';
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+if (!process.env.PORT) dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
+
 import express, { Request, Response, NextFunction } from 'express';
 import { createProxyMiddleware, Options } from 'http-proxy-middleware';
 import K8sDiscovery from './lib/k8s-discovery';
@@ -5,7 +10,7 @@ import DocumentAffinity from './lib/document-affinity';
 import LoadBalancer from './lib/load-balancer';
 import logger from './lib/logger';
 import { optionalApiKeyAuth } from './lib/auth';
-import type { Backend } from './lib/types';
+
 
 // Ensure AWS_REGION is set when using AWS credentials (e.g. for EKS get-token)
 if (process.env.AWS_ACCESS_KEY_ID && !process.env.AWS_REGION) {
@@ -70,7 +75,8 @@ app.get('/metrics', async (req: Request, res: Response) => {
         url: b.url,
         status: b.status,
         connections: b.connections,
-        weight: b.weight
+        weight: b.weight,
+
       }))
     };
     res.json(metrics);
