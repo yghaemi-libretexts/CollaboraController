@@ -126,47 +126,43 @@ app.use('*', async (req: Request, res: Response, next: NextFunction) => {
     const proxyOptions: Options = {
       target: backend.url,
       changeOrigin: true,
-      ws: true, // WebSocket support for Collabora
-      onProxyReq: (proxyReq, req, res) => {
-        // Track connection
-        loadBalancer.incrementConnections(backend.url);
-        
-        // Add document ID to headers for tracking
-        if (documentId) {
-          documentAffinity.setAffinity(documentId, backend.url).catch(err => {
-            logger.error('Failed to set document affinity:', err);
-          });
-          proxyReq.setHeader('X-WOPI-Document-ID', documentId);
+      ws: true,
+      on: {
+        proxyReq: (proxyReq, req, res) => {
+          loadBalancer.incrementConnections(backend.url);
+
+          if (documentId) {
+            documentAffinity.setAffinity(documentId, backend.url).catch(err => {
+              logger.error('Failed to set document affinity:', err);
+            });
+            proxyReq.setHeader('X-WOPI-Document-ID', documentId);
+          }
+        },
+        proxyRes: (proxyRes, req, res) => {
+          if (documentId) {
+            documentAffinity.setAffinity(documentId, backend.url).catch(err => {
+              logger.error('Failed to set document affinity:', err);
+            });
+          }
+        },
+        error: (err, req, res) => {
+          logger.error(`Proxy error for ${backend.url}:`, err);
+          loadBalancer.markBackendUnhealthy(backend.url);
+
+          loadBalancer.selectBackend(documentId)
+            .then(altBackend => {
+              if (altBackend) {
+                logger.info(`Retrying with alternative backend: ${altBackend.url}`);
+              }
+            });
+
+          if ('headersSent' in res && !res.headersSent) {
+            (res as Response).status(502).json({ error: 'Backend unavailable' });
+          }
+        },
+        close: (req, socket, head) => {
+          loadBalancer.decrementConnections(backend.url);
         }
-      },
-      onProxyRes: (proxyRes, req, res) => {
-        // Store document affinity if document ID exists
-        if (documentId) {
-          documentAffinity.setAffinity(documentId, backend.url).catch(err => {
-            logger.error('Failed to set document affinity:', err);
-          });
-        }
-      },
-      onError: (err, req, res) => {
-        logger.error(`Proxy error for ${backend.url}:`, err);
-        loadBalancer.markBackendUnhealthy(backend.url);
-        
-        // Try to find another backend
-        loadBalancer.selectBackend(documentId)
-          .then(altBackend => {
-            if (altBackend) {
-              logger.info(`Retrying with alternative backend: ${altBackend.url}`);
-              // Retry logic could be implemented here
-            }
-          });
-        
-        if (!res.headersSent) {
-          (res as Response).status(502).json({ error: 'Backend unavailable' });
-        }
-      },
-      onClose: (req, socket, head) => {
-        // Decrement connection count when connection closes
-        loadBalancer.decrementConnections(backend.url);
       }
     };
     
