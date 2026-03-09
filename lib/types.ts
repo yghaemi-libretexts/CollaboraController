@@ -3,7 +3,7 @@ import { Request, Response } from 'express';
 
 export interface Backend {
   url: string;
-  serviceName: string;
+  podName: string;
   serviceIP: string;
   weight: number;
   draining: boolean;

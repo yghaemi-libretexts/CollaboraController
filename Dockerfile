@@ -1,4 +1,4 @@
-FROM node:18-alpine AS builder
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -16,15 +16,15 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:18-alpine
+FROM node:20-alpine
 
 WORKDIR /app
 
 # Copy package files
 COPY package*.json ./
 
-# Install only production dependencies
-RUN npm ci --only=production
+# Install only production dependencies; skip prepare (husky) which is irrelevant in Docker
+RUN npm ci --omit=dev --ignore-scripts
 
 # Copy built files from builder
 COPY --from=builder /app/dist ./dist

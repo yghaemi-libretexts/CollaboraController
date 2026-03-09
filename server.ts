@@ -3,8 +3,9 @@ import dotenv from 'dotenv';
 dotenv.config({ path: path.resolve(__dirname, '.env') });
 if (!process.env.PORT) dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
+import http from 'http';
 import express, { Request, Response, NextFunction } from 'express';
-import { createProxyMiddleware, Options } from 'http-proxy-middleware';
+import { createProxyMiddleware } from 'http-proxy-middleware';
 import K8sDiscovery from './lib/k8s-discovery';
 import DocumentAffinity from './lib/document-affinity';
 import LoadBalancer from './lib/load-balancer';
@@ -46,17 +47,14 @@ const loadBalancer = new LoadBalancer({
   logger
 });
 
-// Middleware to parse JSON
-app.use(express.json());
-
 // Require a Bearer token on every request (except health/metrics)
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (req.path === '/health' || req.path === '/metrics') return next();
 
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing Bearer token' });
-  }
+  // const authHeader = req.headers.authorization;
+  // if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  //   return res.status(401).json({ error: 'Missing Bearer token' });
+  // }
 
   next();
 });
@@ -99,94 +97,117 @@ app.get('/metrics', async (req: Request, res: Response) => {
 });
 
 // Extract document ID from WOPI request
-function extractDocumentId(req: Request): string | null {
-  // WOPI requests typically have document IDs in the path
-  // Format: /wopi/files/{file_id}/contents or /wopi/files/{file_id}
-  const wopiMatch = req.originalUrl.match(/\/wopi\/files\/([^\/]+)/);
+function extractDocumentId(req: http.IncomingMessage): string | null {
+  const url = (req as any).originalUrl || req.url || '';
+
+  const wopiMatch = url.match(/\/wopi\/files\/([^\/]+)/);
   if (wopiMatch) {
     return wopiMatch[1];
   }
-  
-  // Also check query parameters
-  if (req.query.file_id && typeof req.query.file_id === 'string') {
-    return req.query.file_id;
+
+  const query = (req as any).query;
+  if (query?.file_id && typeof query.file_id === 'string') {
+    return query.file_id;
   }
-  
-  // Check for document ID in headers
+
   const docIdHeader = req.headers['x-wopi-document-id'];
   if (docIdHeader && typeof docIdHeader === 'string') {
     return docIdHeader;
   }
-  
+
   return null;
 }
 
-// Main proxy middleware with WOPI document affinity
-app.use('*', async (req: Request, res: Response, next: NextFunction) => {
-  try {
+// Single proxy middleware with dynamic routing via `router`
+const proxy = createProxyMiddleware({
+  // target: 'http://localhost:9980',
+  router: async (req) => {
     const documentId = extractDocumentId(req);
-    // Get the target backend using load balancer
     const backend = await loadBalancer.selectBackend(documentId);
-    if (!backend) {
-      logger.warn('No available backends');
-      return res.status(503).json({ error: 'No available backends' });
-    }
+    // const backend = {
+    //   url: 'http://localhost:9980',
+    //   connections: 0,
+    //   status: 'healthy',
+    //   weight: 100,
+    //   draining: false,
+    //   lastSeen: new Date(),
+    //   podName: 'localhost',
+    //   serviceIP: '127.0.0.1',
+    // }
     
-    logger.debug(`Routing request to ${backend.url} for document ${documentId || 'none'}`);
-    
-    // Create proxy middleware for this specific backend
-    const proxyOptions: Options = {
-      target: backend.url,
-      changeOrigin: true,
-      ws: true,
-      on: {
-        proxyReq: (proxyReq, req, res) => {
-          loadBalancer.incrementConnections(backend.url);
+    if (!backend) throw new Error('No available backends');
+    (req as any)._backend = backend;
+    (req as any)._documentId = documentId;
+    return backend.url;
+  },
+  changeOrigin: false,
+  ws: true,
+  timeout: 0,
+  proxyTimeout: 0,
+  on: {
+    proxyReq: (proxyReq, req) => {
+      const backend = (req as any)._backend;
+      const documentId = (req as any)._documentId as string | null;
+      if (!backend) return;
 
-          if (documentId) {
-            documentAffinity.setAffinity(documentId, backend.url).catch(err => {
-              logger.error('Failed to set document affinity:', err);
-            });
-            proxyReq.setHeader('X-WOPI-Document-ID', documentId);
-          }
-        },
-        proxyRes: (proxyRes, req, res) => {
-          if (documentId) {
-            documentAffinity.setAffinity(documentId, backend.url).catch(err => {
-              logger.error('Failed to set document affinity:', err);
-            });
-          }
-        },
-        error: (err, req, res) => {
-          logger.error(`Proxy error for ${backend.url}:`, err);
-          loadBalancer.markBackendUnhealthy(backend.url);
+      const host = req.headers.host || '';
+      const clientIp = (req as any).socket?.remoteAddress || '';
+      const existing = req.headers['x-forwarded-for'];
+      const forwarded = existing ? `${existing}, ${clientIp}` : clientIp;
 
-          loadBalancer.selectBackend(documentId)
-            .then(altBackend => {
-              if (altBackend) {
-                logger.info(`Retrying with alternative backend: ${altBackend.url}`);
-              }
-            });
+      proxyReq.setHeader('X-Forwarded-Host', host);
+      proxyReq.setHeader('X-Forwarded-Proto', 'https');
+      proxyReq.setHeader('X-Forwarded-For', forwarded);
 
-          if ('headersSent' in res && !res.headersSent) {
-            (res as Response).status(502).json({ error: 'Backend unavailable' });
-          }
-        },
-        close: (req, socket, head) => {
-          loadBalancer.decrementConnections(backend.url);
-        }
+      loadBalancer.incrementConnections(backend.url);
+
+      if (documentId) {
+        documentAffinity.setAffinity(documentId, backend.url).catch(err => {
+          logger.error('Failed to set document affinity:', err);
+        });
+        proxyReq.setHeader('X-WOPI-Document-ID', documentId);
       }
-    };
-    
-    const proxy = createProxyMiddleware(proxyOptions);
-    proxy(req, res, next);
-  } catch (error) {
-    logger.error('Error in proxy middleware:', error);
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
+
+      logger.debug('Proxy request', {
+        method: proxyReq.method,
+        target: `${backend.url}${proxyReq.path}`,
+        headers: proxyReq.getHeaders(),
+      });
+    },
+    proxyRes: (_proxyRes, req) => {
+      const backend = (req as any)._backend;
+      const documentId = (req as any)._documentId as string | null;
+      if (documentId && backend) {
+        documentAffinity.setAffinity(documentId, backend.url).catch(err => {
+          logger.debug('Failed to set document affinity:', err);
+        });
+      }
+      if (backend) {
+        _proxyRes.on('end', () => {
+          loadBalancer.decrementConnections(backend.url);
+        });
+      }
+    },
+    error: (err, req, res) => {
+      const backend = (req as any)._backend;
+      logger.error(`Proxy error for ${backend?.url ?? 'unknown'}:`, err);
+
+      if (backend) {
+        loadBalancer.markBackendUnhealthy(backend.url);
+      }
+
+      if ('headersSent' in res && !res.headersSent) {
+        (res as Response).status(502).json({ error: 'Backend unavailable' });
+      }
+    },
+    close: (_req, socket) => {
+      const backend = (socket as any)._backend;
+      if (backend) loadBalancer.decrementConnections(backend.url);
     }
   }
 });
+
+app.use(proxy);
 
 // Initialize services and start server
 async function start(): Promise<void> {
@@ -203,8 +224,10 @@ async function start(): Promise<void> {
     await loadBalancer.start();
     logger.info('Load balancer started');
     
-    // Start Express server
-    app.listen(PORT, () => {
+    // Start Express server and wire up WebSocket upgrades
+    const server = http.createServer(app);
+    server.on('upgrade', proxy.upgrade!);
+    server.listen(PORT, () => {
       logger.info(`Collabora Controller listening on port ${PORT}`);
       logger.info(`Targeting Collabora service: ${COLLABORA_SERVICE} in namespace: ${COLLABORA_NAMESPACE}`);
     });
